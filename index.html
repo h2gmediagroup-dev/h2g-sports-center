@@ -3,10 +3,43 @@
 </style></head><body><div class="wrap"><header class="top"><div class="brand">H2G <b>SPORTS CENTER</b></div><div class="status" id="status">LOADING SCORES…</div></header><main class="grid" id="grid"></main><footer class="footer"><span id="leagueLabel">NFL • NCAAF • NBA • MLB</span><span id="pageLabel">AUTO ROTATION</span></footer></div><script>
 /* ESPN's public scoreboard endpoints are unofficial for third-party use. Validate commercial rights before deployment. */
 const leagues=[{name:'NFL',path:'football/nfl'},{name:'COLLEGE FOOTBALL',path:'football/college-football'},{name:'NBA',path:'basketball/nba'},{name:'MLB',path:'baseball/mlb'}];
+// College football priority: AP Top 25, FL/FSU/Miami/UCF, major conferences, live close games.
+const localSchools=['florida gators','florida state seminoles','miami hurricanes','ucf knights'];
+const majorConferenceIds=new Set(['1','2','4','5','8','9','12','15','17']); // ACC, Big Ten, Big 12, SEC and other major FBS groups (ESPN IDs vary)
+const majorSchools=['alabama','auburn','georgia','lsu','tennessee','texas','oklahoma','ole miss','mississippi state','kentucky','south carolina','vanderbilt','texas a&m','arkansas','ohio state','michigan','penn state','oregon','usc','ucla','notre dame','clemson','virginia tech','north carolina','duke','louisville','pittsburgh','nc state','wake forest','stanford','california','smu','florida','florida state','miami','ucf','kansas state','kansas','baylor','tcu','texas tech','oklahoma state','arizona','arizona state','utah','byu','colorado','iowa state','west virginia','cincinnati','houston','washington','wisconsin','iowa','nebraska','minnesota','michigan state','indiana','illinois','northwestern','maryland','rutgers','purdue'];
 const grid=document.getElementById('grid'),status=document.getElementById('status'),pageLabel=document.getElementById('pageLabel'),leagueLabel=document.getElementById('leagueLabel');let pages=[],page=0,lastSuccess=0;
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function normalize(ev,league){const comp=ev.competitions?.[0];if(!comp||!comp.competitors||comp.competitors.length<2)return null;const a=comp.competitors.find(x=>x.homeAway==='away')||comp.competitors[0],b=comp.competitors.find(x=>x.homeAway==='home')||comp.competitors[1];const st=comp.status?.type;return {league,away:a.team?.abbreviation||'AWAY',home:b.team?.abbreviation||'HOME',as:a.score??'–',hs:b.score??'–',state:st?.shortDetail||st?.description||'SCHEDULED',rank:st?.state==='in'?0:st?.state==='pre'?1:2}}
-async function fetchLeague(l){const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);try{const res=await fetch('https://site.api.espn.com/apis/site/v2/sports/'+l.path+'/scoreboard?limit=100',{signal:controller.signal,cache:'no-store'});if(!res.ok)throw Error(res.status);const data=await res.json();return (data.events||[]).map(e=>normalize(e,l.name)).filter(Boolean).sort((a,b)=>a.rank-b.rank)}finally{clearTimeout(timer)}}
+function normalize(ev,league){
+ const comp=ev.competitions?.[0];if(!comp||!comp.competitors||comp.competitors.length<2)return null;
+ const a=comp.competitors.find(x=>x.homeAway==='away')||comp.competitors[0],b=comp.competitors.find(x=>x.homeAway==='home')||comp.competitors[1];
+ const st=comp.status?.type,live=st?.state==='in',pre=st?.state==='pre';
+ const name=x=>(x.team?.displayName||x.team?.name||'').toLowerCase();
+ const teams=[a,b],names=teams.map(name);
+ const ranks=teams.map(x=>Number(x.curatedRank?.current??x.rank??999));
+ const ranked=ranks.some(n=>n>=1&&n<=25),rankedMatchup=ranks.every(n=>n>=1&&n<=25);
+ const local=names.some(n=>localSchools.some(s=>n.includes(s)));
+ const major=teams.some(x=>majorConferenceIds.has(String(x.team?.conferenceId||x.conferenceId||'')))||names.some(n=>majorSchools.some(s=>n.includes(s)));
+ const as=Number(a.score),hs=Number(b.score),close=live&&Number.isFinite(as)&&Number.isFinite(hs)&&Math.abs(as-hs)<=8;
+ const priority=rankedMatchup?0:local?1:ranked?2:close?3:major?4:5;
+ return {league,away:a.team?.abbreviation||'AWAY',home:b.team?.abbreviation||'HOME',as:a.score??'–',hs:b.score??'–',state:st?.shortDetail||st?.description||'SCHEDULED',rank:live?0:pre?1:2,priority,ranked,rankedMatchup,local,major,close,live};
+}
+async function fetchLeague(l){
+ const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);
+ try{
+  const isCFB=l.name==='COLLEGE FOOTBALL';
+  const params=isCFB?'?groups=80&limit=400':'?limit=100';
+  const res=await fetch('https://site.api.espn.com/apis/site/v2/sports/'+l.path+'/scoreboard'+params,{signal:controller.signal,cache:'no-store'});
+  if(!res.ok)throw Error(res.status);
+  const data=await res.json();
+  let games=(data.events||[]).map(e=>normalize(e,l.name)).filter(Boolean);
+  if(isCFB){
+   // Keep meaningful FBS matchups, especially ranked and local games.
+   games=games.filter(g=>g.ranked||g.local||g.major||g.close);
+   games.sort((a,b)=>a.priority-b.priority||a.rank-b.rank);
+  }else games.sort((a,b)=>a.rank-b.rank);
+  return games;
+ }finally{clearTimeout(timer)}
+}
 function makePages(results){const out=[];for(let i=0;i<leagues.length;i++){const games=results[i]||[];for(let j=0;j<games.length;j+=4)out.push({name:leagues[i].name,games:games.slice(j,j+4),index:Math.floor(j/4)+1,total:Math.ceil(games.length/4)});}return out}
 function render(){if(!pages.length){grid.innerHTML='<div class="empty" style="grid-column:1/-1">NO SCORES AVAILABLE<br>CHECK NETWORK OR DATA SOURCE</div>';leagueLabel.textContent='H2G SPORTS CENTER';pageLabel.textContent='WAITING FOR DATA';return}page%=pages.length;const p=pages[page];leagueLabel.textContent=p.name;pageLabel.textContent='PAGE '+p.index+' / '+p.total+' • AUTO ROTATION';grid.innerHTML=p.games.map(g=>`<article class="game"><div class="meta">${esc(g.league)} • ${esc(g.state)}</div><div class="team"><span class="abbr">${esc(g.away)}</span><span class="score">${esc(g.as)}</span></div><div class="team"><span class="abbr">${esc(g.home)}</span><span class="score">${esc(g.hs)}</span></div></article>`).join('')+Array.from({length:4-p.games.length},()=>'<article class="game"><div class="empty">MORE GAMES SOON</div></article>').join('')}
 async function refresh(){const results=await Promise.allSettled(leagues.map(fetchLeague));const good=results.filter(r=>r.status==='fulfilled');if(good.length){const next=makePages(results.map(r=>r.status==='fulfilled'?r.value:[]));if(next.length){pages=next;page=0;lastSuccess=Date.now();render()}}status.textContent=good.length===4?'SCORES UPDATED '+new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}):good.length?'PARTIAL DATA • '+good.length+'/4 LEAGUES':'DATA UNAVAILABLE • RETRYING'}
